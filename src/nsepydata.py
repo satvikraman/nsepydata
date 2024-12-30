@@ -173,7 +173,7 @@ class NSEPyData():
             adj_nse_df = pd.concat([adj_nse_df, filt_ohlcv_df], ignore_index=True)
 
         return adj_nse_df
-        
+
 
     def __extractOHLCV(self, nse_df):
         columns = ["DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
@@ -183,6 +183,67 @@ class NSEPyData():
         OHLCV_df[['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']] = OHLCV_df[['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']].replace({',': ''}, regex=True).astype(float)
         OHLCV_df[['VOLUME']] = OHLCV_df[['VOLUME']].replace({',': ''}, regex=True).astype(int)
         return OHLCV_df
+
+
+    def change_time_period(self, nse_ohlcv_df: pd.DataFrame, timeperiod: str) -> pd.DataFrame:
+        """
+        Adjusts the time period of the OHLCV data.
+
+        Args:
+            nse_ohlcv_df (pd.DataFrame): DataFrame containing daily OHLCV data with columns:
+                                        'DATE', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME'.
+            timeperiod (str): String specifying the aggregation period in the format <NUMBER><LETTER>.
+                            LETTER can be 'D', 'W', 'M', 'Q', 'Y' for Daily, Weekly, Monthly, Quarterly, Yearly.
+                            NUMBER specifies the number of periods (e.g., '2D' means 2 Days).
+
+        Returns:
+            pd.DataFrame: Aggregated DataFrame based on the specified time period.
+        """
+        # Extract number and letter from timeperiod
+        num = int(''.join(filter(str.isdigit, timeperiod)))
+        period_type = ''.join(filter(str.isalpha, timeperiod)).upper()
+
+        # Ensure 'DATE' column is a datetime object
+        nse_ohlcv_df['DATE'] = pd.to_datetime(nse_ohlcv_df['DATE'], format='%m/%d/%Y')
+
+        # Set 'DATE' as the index for easier resampling
+        nse_ohlcv_df = nse_ohlcv_df.set_index('DATE')
+
+        # Define the resampling rule based on period type
+        if period_type == 'D':  # Daily aggregation
+            rule = f'{num}D'
+        elif period_type == 'W':  # Weekly aggregation
+            rule = f'{num}W'
+        elif period_type == 'M':  # Monthly aggregation
+            rule = f'{num}M'
+        elif period_type == 'Q':  # Quarterly aggregation (starting Jan, Apr, Jul, Oct)
+            rule = f'{num}Q'
+        elif period_type == 'Y':  # Yearly aggregation
+            rule = f'{num}A'
+        else:
+            raise ValueError(f"Invalid period type: {period_type}. Must be one of 'D', 'W', 'M', 'Q', 'Y'.")
+
+        # Perform aggregation
+        def aggregate_period(group):
+            return pd.Series({
+                'DATE': group.index.min(),  # First date of the period
+                'OPEN': group['OPEN'].iloc[0],  # First value of the period
+                'HIGH': group['HIGH'].max(),   # Maximum value of the period
+                'LOW': group['LOW'].min(),     # Minimum value of the period
+                'CLOSE': group['CLOSE'].iloc[-1],  # Last value of the period
+                'VOLUME': group['VOLUME'].sum()   # Sum of values
+            })
+
+        adj_nse_df = nse_ohlcv_df.resample(rule).apply(aggregate_period).dropna()
+
+        # Reset index to bring 'DATE' back as a column
+        adj_nse_df = adj_nse_df.reset_index(drop=True)
+        # Sort the DataFrame by 'DATE' in descending order
+        adj_nse_df = adj_nse_df.sort_values(by='DATE', ascending=False).reset_index(drop=True)
+        # Format the 'DATE' column back to mm/dd/yyyy format
+        adj_nse_df['DATE'] = adj_nse_df['DATE'].dt.strftime('%m/%d/%Y')
+
+        return adj_nse_df
 
 
     def get_OHLCV_data(self, symbol: str, series: str, start: datetime, end:datetime=None, adjust_corp_action:bool=True, timeperiod:str='1D') -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -215,7 +276,7 @@ class NSEPyData():
         
         timeperiod = timeperiod.upper()
         if timeperiod != '1D':
-            self.__adjust_time_period(nse_ohlcv_df, timeperiod)
+            nse_ohlcv_df = self.change_time_period(nse_ohlcv_df, timeperiod)
 
         return nse_ohlcv_df, nse_corp_act_df
 
