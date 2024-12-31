@@ -98,90 +98,56 @@ class NSEPyData():
         url = "https://www.nseindia.com/api/corporates-corporateActions?index=equities&from_date=05-01-2024&to_date=05-12-2024&csv=true"
 
 
-    def __download_corporate_action(self, symbol):
-        url = "https://www.nseindia.com/api/corporates-corporateActions"
+    def __get_action_factor(self, purpose):
+        actions = {"split": "SPLIT", "bonus": "BONUS"}
+        action = None
+        purpose = purpose.lower()
+        for key, value in actions.items():
+            if key in purpose:
+                action = value
 
-        # Initialize the final DataFrame
-        nse_df = pd.DataFrame()
-
-        # Session to manage cookies automatically
-        with requests.Session() as session:
-            # Send an initial request to the main site to get cookies and headers
-            session.get('https://www.nseindia.com', headers=self.headers)
-
-            # Update request parameters
-            params = {
-                "index": "equities",
-                "symbol": symbol,
-                "csv": "true"
-            }
-
-            # Make the actual request to download the CSV file
-            response = session.get(url, headers=self.headers, params=params)
-            
-            # Check if response is empty
-            if not response.content.strip():
-                self.__logger.info("No more data to fetch.")
-
-            # Parse the CSV content and append to the final DataFrame
-            try:
-                df = pd.read_csv(StringIO(response.text))
-                if df.shape[0] != 0:
-                    nse_df = pd.concat([nse_df, df], ignore_index=True)
-                    self.__logger.info(f"Fetched coporate action data for {symbol}.")
-                else:
-                    self.__logger.info("No more data to fetch.")
-            except Exception as e:
-                self.__logger.error(f"Error parsing response: {e}")
-
-        return nse_df       
+        pattern = r"[^0-9]+(\d+)[^0-9]+(\d+)"
+        matches = re.search(pattern, purpose)
+        if matches:
+            if action == 'SPLIT':
+                try:
+                    factor = float(matches.group(1)) / float(matches.group(2))
+                except ZeroDivisionError:
+                    raise ValueError("Division by zero in corporate action factor calculation.")
+            elif action == 'BONUS':
+                try:
+                    factor = (float(matches.group(2)) + float(matches.group(1))) / float(matches.group(2))
+                except ZeroDivisionError:
+                    raise ValueError("Division by zero in corporate action factor calculation.")                
+        return action, factor
 
 
     def __adjust_for_corp_action(self, ohlcv_df, corp_act_df):    
         # Filter rows containing the words "Split" or "Bonus"
         filt_corp_act_df = corp_act_df[corp_act_df['PURPOSE'].str.contains('Split|Bonus', case=False, na=False)]
-        ohlcv_df['DATE'] = pd.to_datetime(ohlcv_df['DATE'], format='%d-%b-%Y')
-        start = end = None
+        start = None
         adj_columns = ['OPEN', 'HIGH', 'LOW', 'CLOSE']
-        adj_nse_df = pd.DataFrame()
         for index, row in filt_corp_act_df.iterrows():
             record_date = row['RECORD DATE']
             purpose = row['PURPOSE']
-            pattern = r"[^0-9]+(\d+)[^0-9]+(\d+)"
-            matches = re.search(pattern, purpose)
-            if matches:
-                try:
-                    factor = float(matches.group(1)) / float(matches.group(2))
-                except ZeroDivisionError:
-                    raise ValueError("Division by zero in corporate action factor calculation.")
+            action, factor = self.__get_action_factor(purpose)
+            if action is not None:
+                start = datetime.strptime(record_date, '%d-%b-%Y')
+                ohlcv_df.loc[(ohlcv_df['DATE'] < start), adj_columns] = (ohlcv_df[adj_columns] / factor).round(2)
+                ohlcv_df.loc[(ohlcv_df['DATE'] < start), 'VOLUME'] = (ohlcv_df['VOLUME'] * factor).astype(int)
 
-                factor = int(matches.group(1)) / int(matches.group(2))
-                start = record_date
-                if end is None:
-                    filt_ohlcv_df = ohlcv_df[(ohlcv_df['DATE'] >= start)]
-                else:
-                    filt_ohlcv_df = ohlcv_df[(ohlcv_df['DATE'] >= start) & (ohlcv_df['DATE'] < end)]
-                    filt_ohlcv_df[adj_columns] = (filt_ohlcv_df[adj_columns] / factor).round(2)
-                    filt_ohlcv_df['VOLUME'] *= int(factor)
-                end = start
-                adj_nse_df = pd.concat([adj_nse_df, filt_ohlcv_df], ignore_index=True)
-        
-        if start is not None:
-            filt_ohlcv_df = ohlcv_df[(ohlcv_df['DATE'] < start)]
-            filt_ohlcv_df[adj_columns] = (filt_ohlcv_df[adj_columns] / factor).round(2)
-            filt_ohlcv_df['VOLUME'] *= int(factor)
-            adj_nse_df = pd.concat([adj_nse_df, filt_ohlcv_df], ignore_index=True)
-
-        return adj_nse_df
+        return ohlcv_df
 
 
     def __extractOHLCV(self, nse_df):
         columns = ["DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
         OHLCV_df = nse_df[columns]
-        OHLCV_df.rename(columns={'Date': 'DATE'}, inplace=True)
-        OHLCV_df.rename(columns={'close': 'CLOSE'}, inplace=True)
-        OHLCV_df[['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']] = OHLCV_df[['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']].replace({',': ''}, regex=True).astype(float)
-        OHLCV_df[['VOLUME']] = OHLCV_df[['VOLUME']].replace({',': ''}, regex=True).astype(int)
+        OHLCV_df = OHLCV_df.rename(columns={'Date': 'DATE'})
+        OHLCV_df = OHLCV_df.rename(columns={'close': 'CLOSE'})
+        OHLCV_df.loc[:, ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']] = OHLCV_df[['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']].replace({',': ''}, regex=True).astype(float)
+        OHLCV_df.loc[:, ['VOLUME']] = OHLCV_df[['VOLUME']].replace({',': ''}, regex=True).astype(int)
+        OHLCV_df.loc[:, 'DATE'] = pd.to_datetime(OHLCV_df['DATE'], format='%d-%b-%Y')
+
         return OHLCV_df
 
 
@@ -203,9 +169,6 @@ class NSEPyData():
         num = int(''.join(filter(str.isdigit, timeperiod)))
         period_type = ''.join(filter(str.isalpha, timeperiod)).upper()
 
-        # Ensure 'DATE' column is a datetime object
-        nse_ohlcv_df['DATE'] = pd.to_datetime(nse_ohlcv_df['DATE'], format='%m/%d/%Y')
-
         # Set 'DATE' as the index for easier resampling
         nse_ohlcv_df = nse_ohlcv_df.set_index('DATE')
 
@@ -225,6 +188,8 @@ class NSEPyData():
 
         # Perform aggregation
         def aggregate_period(group):
+            if group.empty:
+                return None  # Return None for empty groups
             return pd.Series({
                 'DATE': group.index.min(),  # First date of the period
                 'OPEN': group['OPEN'].iloc[0],  # First value of the period
@@ -240,13 +205,51 @@ class NSEPyData():
         adj_nse_df = adj_nse_df.reset_index(drop=True)
         # Sort the DataFrame by 'DATE' in descending order
         adj_nse_df = adj_nse_df.sort_values(by='DATE', ascending=False).reset_index(drop=True)
-        # Format the 'DATE' column back to mm/dd/yyyy format
-        adj_nse_df['DATE'] = adj_nse_df['DATE'].dt.strftime('%m/%d/%Y')
 
         return adj_nse_df
 
 
-    def get_OHLCV_data(self, symbol: str, series: str, start: datetime, end:datetime=None, adjust_corp_action:bool=True, timeperiod:str='1D') -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def get_corporate_action_data(self, symbol):
+            url = "https://www.nseindia.com/api/corporates-corporateActions"
+
+            # Initialize the final DataFrame
+            nse_df = pd.DataFrame()
+
+            # Session to manage cookies automatically
+            with requests.Session() as session:
+                # Send an initial request to the main site to get cookies and headers
+                session.get('https://www.nseindia.com', headers=self.headers)
+
+                # Update request parameters
+                params = {
+                    "index": "equities",
+                    "symbol": symbol,
+                    "csv": "true"
+                }
+
+                # Make the actual request to download the CSV file
+                response = session.get(url, headers=self.headers, params=params)
+                
+                # Check if response is empty
+                if not response.content.strip():
+                    self.__logger.info("No more data to fetch.")
+
+                # Parse the CSV content and append to the final DataFrame
+                try:
+                    df = pd.read_csv(StringIO(response.text))
+                    if df.shape[0] != 0:
+                        nse_df = pd.concat([nse_df, df], ignore_index=True)
+                        self.__logger.info(f"Fetched coporate action data for {symbol}.")
+                    else:
+                        self.__logger.info("No more data to fetch.")
+                except Exception as e:
+                    self.__logger.error(f"Error parsing response: {e}")
+
+            return nse_df 
+
+
+    def get_OHLCV_data(self, symbol: str, series: str, start: str, end:str=None, 
+                       adjust_corp_action:bool=True, timeperiod:str='1D') -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Downloads the historical data of a NSE symbol.
 
@@ -268,20 +271,22 @@ class NSEPyData():
         start = datetime.strptime(start, '%d-%b-%Y')
         nse_df = self.__download_historical_price_volume(symbol, series, start, fetch_end)
         nse_ohlcv_df = self.__extractOHLCV(nse_df)
-        nse_corp_act_df = pd.DataFrame()
         
         if adjust_corp_action:
-            nse_corp_act_df = self.__download_corporate_action(symbol)
+            nse_corp_act_df = self.get_corporate_action_data(symbol)
             nse_ohlcv_df = self.__adjust_for_corp_action(nse_ohlcv_df, nse_corp_act_df)
-        
+
         if end is not None:
+            end = datetime.strptime(end, '%d-%b-%Y')
             nse_ohlcv_df = nse_ohlcv_df[(nse_ohlcv_df['DATE'] <= end)]
 
         timeperiod = timeperiod.upper()
         if timeperiod != '1D':
             nse_ohlcv_df = self.change_time_period(nse_ohlcv_df, timeperiod)
+        
+        nse_ohlcv_df['DATE'] = pd.to_datetime(nse_ohlcv_df['DATE']).dt.strftime('%d-%b-%Y')
 
-        return nse_ohlcv_df, nse_corp_act_df
+        return nse_ohlcv_df
 
 
     def download_bhav(self, date):
