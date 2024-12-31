@@ -264,9 +264,9 @@ class NSEPyData():
             If no data is found, both DataFrames will be empty.
         """
 
-        end = datetime.now().date() if end == None else datetime.strptime(end, '%d-%b-%Y')
+        fetch_end = datetime.now() if end == None or adjust_corp_action else datetime.strptime(end, '%d-%b-%Y')
         start = datetime.strptime(start, '%d-%b-%Y')
-        nse_df = self.__download_historical_price_volume(symbol, series, start, end)
+        nse_df = self.__download_historical_price_volume(symbol, series, start, fetch_end)
         nse_ohlcv_df = self.__extractOHLCV(nse_df)
         nse_corp_act_df = pd.DataFrame()
         
@@ -274,6 +274,9 @@ class NSEPyData():
             nse_corp_act_df = self.__download_corporate_action(symbol)
             nse_ohlcv_df = self.__adjust_for_corp_action(nse_ohlcv_df, nse_corp_act_df)
         
+        if end is not None:
+            nse_ohlcv_df = nse_ohlcv_df[(nse_ohlcv_df['DATE'] <= end)]
+
         timeperiod = timeperiod.upper()
         if timeperiod != '1D':
             nse_ohlcv_df = self.change_time_period(nse_ohlcv_df, timeperiod)
