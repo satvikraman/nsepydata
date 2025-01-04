@@ -37,7 +37,7 @@ class NSEPyData():
 
     def __download_csv(self, url, host=None, params=None):
         # Initialize the final DataFrame
-        nse_df = pd.DataFrame()
+        nse_df = None
 
         # Session to manage cookies automatically
         with requests.Session() as session:
@@ -243,6 +243,18 @@ class NSEPyData():
 
 
     def get_corporate_action_data(self, symbol):
+        """
+        Returns all corporate actions of a NSE traded stock as a pandas dataframe
+
+        Args:
+            symbol (str): [Required] NSE symbol for which corporate action is required
+
+        Returns:
+            pd.DataFrame: 
+            - The dataframe contains the following columns - 'DATE' 'OPEN' 'HIGH' 'LOW' 'CLOSE' and 'VOLUME'. The dataframe can be indexed using the 'DATE' column.
+            Every row of the dataframe refers to 1 timeperiod worth of data and the date refers to the start of the period
+            Returns None, if no data is found
+        """        
         url = "https://www.nseindia.com/api/corporates-corporateActions"
 
         # Initialize the final DataFrame
@@ -284,20 +296,20 @@ class NSEPyData():
     def get_OHLCV_data(self, symbol: str, start: str, end:str=None, 
                        adjust_corp_action:bool=True, timeperiod:str='1D') -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Downloads the historical data of a NSE symbol.
+        Returns the historical data of a NSE traded stock as a pandas dataframe
 
         Args:
             symbol (str): [Required] NSE symbol for which the historical data needs to be downloaded
-            start (datetime): [Required] A datetime object indicating from when the historical data is needed
-            end (datetime): [Optional] A datetime object indicating until when the historical data is needed. Default: Today's date
-            adjust_corp_action (bool): [Optional] A boolean variable indicating if the stock price should be adjusted for corporate actions. Default = True
+            start (str): [Required] Start date in the form of dd-mmm-yyyy indicating from when the historical data is needed. Example: '15-Sep-2008'
+            end (str): [Optional] End date in the form of dd-mmm-yyyy indicating until when the data is needed. Example: '15-Sep-2008'. Default: Today's date
+            adjust_corp_action (bool): [Optional] A boolean variable indicating if the stock price should be adjusted for corporate actions (bonus and stock splits). Default = True
             timeperiod (str) : [Optional] Aggregate stock quote so that every row in the dataframe corresponds to this duration - 1W, 2W, 1M, 1Q, 1Y. Default = '1D'
 
         Returns:
-            Tuple[pd.DataFrame, pd.DataFrame]: 
-            - The first DataFrame contains OHLC (Open, High, Low, Close) data.
-            - The second DataFrame contains corporate action data.
-            If no data is found, both DataFrames will be empty.
+            pd.DataFrame: 
+            - The dataframe contains the following columns - 'DATE' 'OPEN' 'HIGH' 'LOW' 'CLOSE' and 'VOLUME'. The dataframe can be indexed using the 'DATE' column.
+            Every row of the dataframe refers to 1 timeperiod worth of data and the date refers to the start of the period
+            Returns None, if no data is found
         """
         series = nse_ohlcv_df = None
         symbol = symbol.upper()
@@ -329,7 +341,20 @@ class NSEPyData():
         return nse_ohlcv_df
 
 
-    def get_securities_in_segment(self, segment):
+    def get_securities_in_segment(self, segment) -> pd.DataFrame:
+        """
+        Returns the list of NSE traded stocks in the EQUITY or SME segment as a pandas dataframe.
+
+        Args:
+            segment (str): [Required] 'EQUITY' / 'SME'
+
+        Returns:
+            pd.DataFrame: 
+            - Contains the list of NSE traded stocks in the provided segment
+            The dataframe contains the following columns 'SYMBOL', 'NAME_OF_COMPANY', 'SERIES', 'DATE_OF_LISTING', 'PAID_UP_VALUE', 'ISIN_NUMBER', 'FACE_VALUE'. 
+            An additional column by the name 'MARKET_LOT' is also available in case the segment is 'EQUITY'
+            Returns None, if no data is found
+        """        
         segment = segment.upper()
         host = 'nsearchives.nseindia.com'
         if segment == 'EQUITY':
