@@ -1,9 +1,11 @@
 from datetime import datetime
 from io import StringIO
+import io
 import logging
 import pandas as pd
 import re
 import requests
+import zipfile
 from typing import Tuple
 
 class NSEPyData():
@@ -77,50 +79,43 @@ class NSEPyData():
         # Initialize the final DataFrame
         nse_df = pd.DataFrame()
 
-        # Session to manage cookies automatically
-        with requests.Session() as session:
-            # Send an initial request to the main site to get cookies and headers
-            session.get('https://www.nseindia.com', headers=self.headers)
+        self.__logger.info(f"Fetching data for {symbol} from {start.strftime('%d-%b-%Y')} to {end.strftime('%d-%b-%Y')}.")
+        while not last:
+            begin = end.replace(month=1, day=1)
+            if start != None and begin <= start:
+                begin = start
+                last = True
 
-            self.__logger.info(f"Fetching data for {symbol} from {start.strftime('%d-%b-%Y')} to {end.strftime('%d-%b-%Y')}.")
-            while not last:
-                begin = end.replace(month=1, day=1)
-                if start != None and begin <= start:
-                    begin = start
-                    last = True
+            # Update request parameters
+            params = {
+                "symbol": symbol,
+                "series": f'["{series}"]',
+                "from": begin.strftime("%d-%m-%Y"),
+                "to": end.strftime("%d-%m-%Y"),
+                "csv": "true",
+            }
 
-                # Update request parameters
-                params = {
-                    "symbol": symbol,
-                    "series": f'["{series}"]',
-                    "from": begin.strftime("%d-%m-%Y"),
-                    "to": end.strftime("%d-%m-%Y"),
-                    "csv": "true",
-                }
+            df = self.__download_csv(url, host='www.nseindia.com', params=params)
+            
+            # Check if response is empty
+            if df is None:
+                self.__logger.info("No more data to fetch.")
+                break
 
-                # Make the actual request to download the CSV file
-                response = session.get(url, headers=self.headers, params=params)
-                
-                # Check if response is empty
-                if not response.content.strip():
+            # Parse the CSV content and append to the final DataFrame
+            try:
+                if df.shape[0] != 0:
+                    nse_df = pd.concat([nse_df, df], ignore_index=True)
+                    self.__logger.info(f"Fetched data from {start.strftime('%d-%m-%Y')} to {end.strftime('%d-%m-%Y')}.")
+                else:
                     self.__logger.info("No more data to fetch.")
                     break
+            except Exception as e:
+                self.__logger.error(f"Error parsing response for {start.year}: {e}")
+                break
 
-                # Parse the CSV content and append to the final DataFrame
-                try:
-                    df = pd.read_csv(StringIO(response.text))
-                    if df.shape[0] != 0:
-                        nse_df = pd.concat([nse_df, df], ignore_index=True)
-                        self.__logger.info(f"Fetched data from {start.strftime('%d-%m-%Y')} to {end.strftime('%d-%m-%Y')}.")
-                    else:
-                        self.__logger.info("No more data to fetch.")
-                        break
-                except Exception as e:
-                    self.__logger.error(f"Error parsing response for {start.year}: {e}")
-                    break
-
-                # Move to the previous year
-                end = end.replace(month=12, day=31, year=end.year - 1)
+            # Move to the previous year
+            end = end.replace(month=12, day=31, year=end.year - 1)
 
         nse_df.columns.values[0] = 'DATE'
         nse_df.columns.values[2] = 'OPEN'
@@ -128,18 +123,18 @@ class NSEPyData():
         nse_df.columns.values[4] = 'LOW'
         nse_df.columns.values[7] = 'CLOSE'
         nse_df.columns.values[11] = 'VOLUME'
-        return nse_df           
+        return nse_df       
+    
 
-
-    def __get_action_factor(self, purpose):
-        actions = {"split": "SPLIT", "bonus": "BONUS"}
+    def __get_action_factor(self, purpose, prev_close=None):
+        actions = {"split": "SPLIT", "bonus": "BONUS", "dividend": "DIVIDEND"}
         action = None
         purpose = purpose.lower()
         for key, value in actions.items():
             if key in purpose:
                 action = value
 
-        pattern = r"[^0-9]+(\d+)[^0-9]+(\d+)"
+        pattern = r"[^0-9]+(\d+)[^0-9]+(\d+)" if action in ['SPLIT', 'BONUS'] else r"(\d+(?:\.\d+)?)"
         matches = re.search(pattern, purpose)
         if matches:
             if action == 'SPLIT':
@@ -151,11 +146,14 @@ class NSEPyData():
                 try:
                     factor = (float(matches.group(2)) + float(matches.group(1))) / float(matches.group(2))
                 except ZeroDivisionError:
-                    raise ValueError("Division by zero in corporate action factor calculation.")                
+                    raise ValueError("Division by zero in corporate action factor calculation.")
+            elif action == 'DIVIDEND':
+                dividend = float(matches.group(1))
+                factor = (prev_close - dividend) / prev_close
         return action, factor
 
 
-    def __adjust_for_corp_action(self, ohlcv_df, corp_act_df):   
+    def __adjust_for_split_bonus(self, ohlcv_df, corp_act_df):   
         if not corp_act_df.empty:
             # Filter rows containing the words "Split" or "Bonus"
             filt_corp_act_df = corp_act_df[corp_act_df['PURPOSE'].str.contains('Split|Bonus', case=False, na=False)]
@@ -170,6 +168,25 @@ class NSEPyData():
                     ohlcv_df.loc[(ohlcv_df['DATE'] < start), adj_columns] = (ohlcv_df[adj_columns] / factor).round(2)
                     ohlcv_df.loc[(ohlcv_df['DATE'] < start), 'VOLUME'] = (ohlcv_df['VOLUME'] * factor).astype(int)
 
+        return ohlcv_df
+
+
+    def __adjust_for_div(self, ohlcv_df, corp_act_df):   
+        if not corp_act_df.empty:
+            # Filter rows containing the words "Split" or "Bonus"
+            filt_corp_act_df = corp_act_df[corp_act_df['PURPOSE'].str.contains('Dividend', case=False, na=False)]
+            start = None
+            adj_columns = ['OPEN', 'HIGH', 'LOW', 'CLOSE']
+            for index, row in filt_corp_act_df.iterrows():
+                record_date = row['EX-DATE']
+                purpose = row['PURPOSE']
+                start = datetime.strptime(record_date, '%d-%b-%Y')
+                first_idx = (ohlcv_df['DATE'] < start).idxmax()
+                prev_close = ohlcv_df.loc[first_idx, 'CLOSE']
+                action, factor = self.__get_action_factor(purpose, prev_close)
+                if action is not None:
+                    ohlcv_df.loc[(ohlcv_df['DATE'] < start), adj_columns] *= factor
+                    ohlcv_df.loc[(ohlcv_df['DATE'] < start), adj_columns] = ohlcv_df[adj_columns].astype(float).round(2)
         return ohlcv_df
 
 
@@ -260,41 +277,27 @@ class NSEPyData():
         # Initialize the final DataFrame
         nse_df = pd.DataFrame()
 
-        # Session to manage cookies automatically
-        with requests.Session() as session:
-            # Send an initial request to the main site to get cookies and headers
-            session.get('https://www.nseindia.com', headers=self.headers)
+        # Update request parameters
+        params = {
+            "index": "equities",
+            "symbol": symbol,
+            "csv": "true"
+        }
 
-            # Update request parameters
-            params = {
-                "index": "equities",
-                "symbol": symbol,
-                "csv": "true"
-            }
-
-            # Make the actual request to download the CSV file
-            response = session.get(url, headers=self.headers, params=params)
-            
-            # Check if response is empty
-            if not response.content.strip():
-                self.__logger.info("No more data to fetch.")
-
-            # Parse the CSV content and append to the final DataFrame
-            try:
-                df = pd.read_csv(StringIO(response.text))
-                if df.shape[0] != 0:
-                    nse_df = pd.concat([nse_df, df], ignore_index=True)
-                    self.__logger.info(f"Fetched coporate action data for {symbol}.")
-                else:
-                    self.__logger.info("No more data to fetch.")
-            except Exception as e:
-                self.__logger.error(f"Error parsing response: {e}")
+        nse_df = self.__download_csv(url, host = 'www.nseindia.com', params=params)
+        
+        # Check if response is empty
+        if nse_df is None:
+            self.__logger.info("No more data to fetch.")
+        else:
+            self.__logger.info(f"Fetched coporate action data for {symbol}.")
+            nse_df = nse_df.rename(columns={nse_df.columns[0]: "SYMBOL"})
 
         return nse_df 
-
+    
 
     def get_OHLCV_data(self, symbol: str, start: str, end:str=None, 
-                       adjust_corp_action:bool=True, timeperiod:str='1D') -> Tuple[pd.DataFrame, pd.DataFrame]:
+                       adjust_for_split_bonus:bool=True, adjust_for_div:bool = True, timeperiod:str='1D') -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Returns the historical data of a NSE traded stock as a pandas dataframe
 
@@ -302,7 +305,8 @@ class NSEPyData():
             symbol (str): [Required] NSE symbol for which the historical data needs to be downloaded
             start (str): [Required] Start date in the form of dd-mmm-yyyy indicating from when the historical data is needed. Example: '15-Sep-2008'
             end (str): [Optional] End date in the form of dd-mmm-yyyy indicating until when the data is needed. Example: '15-Sep-2008'. Default: Today's date
-            adjust_corp_action (bool): [Optional] A boolean variable indicating if the stock price should be adjusted for corporate actions (bonus and stock splits). Default = True
+            adjust_for_split_bonus (bool): [Optional] A boolean variable indicating if the stock price should be adjusted for corporate actions (bonus and stock splits). Default = True
+            adjust_for_div (bool): [Optional] A boolean variable indicating if the stock price should be adjusted for dividends. If set to True, will assume adjust_for_split_bonus is also True. Default = True
             timeperiod (str) : [Optional] Aggregate stock quote so that every row in the dataframe corresponds to this duration - 1W, 2W, 1M, 1Q, 1Y. Default = '1D'
 
         Returns:
@@ -319,14 +323,15 @@ class NSEPyData():
             series = self.sme_df.loc[self.sme_df['SYMBOL'] == symbol, 'SERIES'].iloc[0]
 
         if series is not None:
-            fetch_end = datetime.now() if end == None or adjust_corp_action else datetime.strptime(end, '%d-%b-%Y')
+            fetch_end = datetime.now() if end == None or adjust_for_split_bonus else datetime.strptime(end, '%d-%b-%Y')
             start = datetime.strptime(start, '%d-%b-%Y')
             nse_df = self.__download_historical_price_volume(symbol, series, start, fetch_end)
             nse_ohlcv_df = self.__extractOHLCV(nse_df)
             
-            if adjust_corp_action:
+            if adjust_for_split_bonus or adjust_for_div:
                 nse_corp_act_df = self.get_corporate_action_data(symbol)
-                nse_ohlcv_df = self.__adjust_for_corp_action(nse_ohlcv_df, nse_corp_act_df)
+                nse_ohlcv_df = self.__adjust_for_split_bonus(nse_ohlcv_df, nse_corp_act_df)
+                nse_ohlcv_df = self.__adjust_for_div(nse_ohlcv_df, nse_corp_act_df)
 
             if end is not None:
                 end = datetime.strptime(end, '%d-%b-%Y')
@@ -398,9 +403,27 @@ class NSEPyData():
                 
                 # Return the content of the response
                 self.__logger.info(f"File downloaded successfully from URL: {url}")
-                return response.content
+                
+                # Extract the ZIP file contents
+                with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+                    # Assume the ZIP contains exactly one CSV file
+                    csv_filename = zf.namelist()[0]
+                    self.__logger.info(f"Extracting file: {csv_filename}")
+                    
+                    # Read the CSV file into a DataFrame
+                    with zf.open(csv_filename) as csv_file:
+                        bhav_df = pd.read_csv(csv_file)
+                
+                self.__logger.info(f"File downloaded and read successfully from URL: {url}")
+                return bhav_df
             except requests.exceptions.RequestException as e:
                 self.__logger.error(f"Error downloading file: {e}")
+                raise
+            except zipfile.BadZipFile as e:
+                self.__logger.error(f"Error extracting ZIP file: {e}")
+                raise
+            except Exception as e:
+                self.__logger.error(f"Unexpected error: {e}")
                 raise
 
 

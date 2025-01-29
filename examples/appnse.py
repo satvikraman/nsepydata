@@ -8,14 +8,16 @@ from nsepydata import NSEPyData
 obj = NSEPyData()
 
 folder = './temp/'
-symbol = 'NMSTEEL'
 
 os.makedirs(folder, exist_ok=True)
 
-#nse_df = obj.get_OHLCV_data(symbol='NESTLEIND', start='01-Dec-2024', end='31-Dec-2024', adjust_corp_action=True, timeperiod='1D')
-#nse_df.to_csv(folder+symbol+'_1D.csv', index=False)
-#nse_corp_act_df = histApp.get_corporate_action_data(symbol)
+symbol = 'NESTLEIND'
+nse_df = obj.get_OHLCV_data(symbol='NESTLEIND', start='01-Jan-2024', end='29-Jan-2025', adjust_for_split_bonus=True, adjust_for_div=True, timeperiod='1D')
+nse_df.to_csv(folder+symbol+'_1D.csv', index=False)
+
+#symbol = 'NESTLEIND'
+#nse_corp_act_df = obj.get_corporate_action_data(symbol)
 #nse_corp_act_df.to_csv(folder+symbol+'_corpact.csv', index=False)
 
-ohlcv_data = obj.get_OHLCV_data(symbol='NESTLEIND', start='01-Dec-2023', end='31-Dec-2024', adjust_corp_action=True, timeperiod='1D')
-nse_df.to_csv(folder+symbol+'_1D.csv', index=False)
+#bhav_df = obj.download_bhav('27-Jan-2025')
+#bhav_df.to_csv(folder+'nsebhav.csv', index=False)
